@@ -102,8 +102,21 @@ int rollPrecision = 158; // this variable represents the time in milliseconds th
 int pitchMax = 150; // this sets the maximum angle of the pitch servo to prevent it from crashing, it should remain below 180, and be greater than the pitchMin
 int pitchMin = 33; // this sets the minimum angle of the pitch servo to prevent it from crashing, it should remain above 0, and be less than the pitchMax
 
+// Ultrasonic Sensor Pins
+const int trigPin = 7;  // Ultrasonic sensor TRIG pin
+const int echoPin = 8;  // Ultrasonic sensor ECHO pin
+
+// Motion Tracking Variables
+bool trackingMode = false;  // Toggle for motion tracking mode
+int fireDistance = 50;  // Distance in cm to auto-fire (adjust based on your needs)
+int detectionThreshold = 10;  // Minimum distance change in cm to consider as motion
+int scanSpeed = 30;  // Speed for scanning (lower = slower, higher = faster)
+int trackingYawSpeed = 20;  // Speed for tracking targets (slower for accuracy)
+
 void shakeHeadYes(int moves = 3); //function prototypes for shakeHeadYes and No for proper compiling
 void shakeHeadNo(int moves = 3);
+long measureDistance();  // function to measure distance with ultrasonic sensor
+void scanAndTrack();  // function to scan for and track motion
 #pragma endregion PINS AND PARAMS
 
 //////////////////////////////////////////////////
@@ -117,6 +130,10 @@ void setup() { //this is our setup function - it runs once on start up, and is b
     pitchServo.attach(11); //attach PITCH servo to pin 11
     rollServo.attach(12); //attach ROLL servo to pin 12
 
+    // Initialize ultrasonic sensor pins
+    pinMode(trigPin, OUTPUT);
+    pinMode(echoPin, INPUT);
+
     // Just to know which program is running on my microcontroller
     Serial.println(F("START " __FILE__ " from " __DATE__ "\r\nUsing library version " VERSION_IRREMOTE));
 
@@ -128,6 +145,8 @@ void setup() { //this is our setup function - it runs once on start up, and is b
     Serial.println(F("at pin 9"));
 
     homeServos(); //set servo motors to home position
+
+    Serial.println(F("Ultrasonic motion tracking enabled - Press # to toggle tracking mode"));
 }
 #pragma endregion SETUP
 
@@ -202,8 +221,26 @@ void loop() {
               shakeHeadNo(3);
               break;
 
+            case hashtag: // Toggle motion tracking mode
+              trackingMode = !trackingMode;
+              if (trackingMode) {
+                Serial.println("TRACKING MODE ENABLED");
+                shakeHeadYes(2);
+              } else {
+                Serial.println("TRACKING MODE DISABLED");
+                shakeHeadNo(2);
+                homeServos();
+              }
+              break;
+
         }
     }
+
+    // If tracking mode is enabled, scan and track motion
+    if (trackingMode) {
+        scanAndTrack();
+    }
+
     delay(5);
 }
 
@@ -329,6 +366,123 @@ void shakeHeadNo(int moves = 3) {
         delay(50); // Pause at starting position
     }
 }
+
+long measureDistance() {
+    // Clear the trigPin
+    digitalWrite(trigPin, LOW);
+    delayMicroseconds(2);
+
+    // Set the trigPin HIGH for 10 microseconds
+    digitalWrite(trigPin, HIGH);
+    delayMicroseconds(10);
+    digitalWrite(trigPin, LOW);
+
+    // Read the echoPin, returns the sound wave travel time in microseconds
+    long duration = pulseIn(echoPin, HIGH, 30000); // 30ms timeout for max ~5m range
+
+    // Calculate distance in centimeters (speed of sound is 343m/s or 0.0343cm/μs)
+    // Distance = (Time × Speed) / 2 (divide by 2 because sound travels to object and back)
+    long distance = duration * 0.0343 / 2;
+
+    // Return 0 if no echo received (out of range)
+    if (distance == 0 || distance > 400) {
+        return 0;
+    }
+
+    return distance;
+}
+
+void scanAndTrack() {
+    static long baselineDistance = 0;
+    static bool targetLocked = false;
+    static unsigned long lastScanTime = 0;
+    static bool scanningRight = true;
+
+    // Don't scan too frequently - give sensor time to settle
+    if (millis() - lastScanTime < 100) {
+        return;
+    }
+    lastScanTime = millis();
+
+    long currentDistance = measureDistance();
+
+    // If we have a valid reading
+    if (currentDistance > 0) {
+
+        // Check if target is within firing range
+        if (currentDistance <= fireDistance && targetLocked) {
+            Serial.print("TARGET IN RANGE: ");
+            Serial.print(currentDistance);
+            Serial.println(" cm - FIRING!");
+            fire();
+            delay(500); // Brief pause after firing
+            baselineDistance = currentDistance;
+            return;
+        }
+
+        // Motion detection: if distance changed significantly, we detected motion
+        if (baselineDistance > 0) {
+            long distanceChange = abs(currentDistance - baselineDistance);
+
+            if (distanceChange > detectionThreshold) {
+                targetLocked = true;
+                Serial.print("MOTION DETECTED at ");
+                Serial.print(currentDistance);
+                Serial.println(" cm - TRACKING");
+
+                // Track the target by continuing to scan in small increments
+                if (currentDistance < baselineDistance) {
+                    // Target is getting closer - might be moving toward us
+                    Serial.println("Target approaching");
+                }
+            }
+        }
+
+        // Update baseline distance
+        baselineDistance = currentDistance;
+    }
+
+    // Perform scanning motion to find targets
+    if (!targetLocked) {
+        // Scan back and forth
+        if (scanningRight) {
+            yawServo.write(yawStopSpeed - scanSpeed);
+            delay(50);
+            yawServo.write(yawStopSpeed);
+        } else {
+            yawServo.write(yawStopSpeed + scanSpeed);
+            delay(50);
+            yawServo.write(yawStopSpeed);
+        }
+
+        // Change direction periodically (every ~2 seconds of scanning)
+        static int scanCounter = 0;
+        scanCounter++;
+        if (scanCounter > 20) {
+            scanningRight = !scanningRight;
+            scanCounter = 0;
+        }
+    } else {
+        // If we have a target, make small tracking adjustments
+        // This keeps the turret pointed at the target as it moves
+        static int trackCounter = 0;
+        trackCounter++;
+
+        // Occasionally make small adjustments to re-center on target
+        if (trackCounter > 10) {
+            // Small scan to keep tracking
+            yawServo.write(yawStopSpeed - trackingYawSpeed);
+            delay(30);
+            yawServo.write(yawStopSpeed);
+            delay(50);
+            yawServo.write(yawStopSpeed + trackingYawSpeed);
+            delay(30);
+            yawServo.write(yawStopSpeed);
+            trackCounter = 0;
+        }
+    }
+}
+
 #pragma endregion FUNCTIONS
 
 //////////////////////////////////////////////////
