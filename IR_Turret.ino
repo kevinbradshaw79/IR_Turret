@@ -455,16 +455,34 @@ void scanAndTrack() {
             Serial.print("cm");
 
             if (distanceChange > detectionThreshold) {
-                // Increment motion detection counter (but don't go crazy)
-                if (!targetLocked && motionDetections < motionConfirmCount) {
+                // If locked and distance isn't changing much, it's a false lock
+                if (targetLocked && abs(currentDistance - previousDistance) < 5) {
+                    noMotionCounter++;
+                    Serial.print(" (no change - ");
+                    Serial.print(noMotionCounter);
+                    Serial.println("/10)");
+
+                    // Lose lock if target distance isn't changing
+                    if (noMotionCounter > 10) {
+                        targetLocked = false;
+                        baselineDistance = 0;
+                        motionDetections = 0;
+                        noMotionCounter = 0;
+                        Serial.println(">> Target lost - no movement");
+                    }
+                } else if (!targetLocked && motionDetections < motionConfirmCount) {
+                    // Not locked yet - increment counter
                     motionDetections++;
                     Serial.print(" >> MOTION! (");
                     Serial.print(motionDetections);
                     Serial.print("/");
                     Serial.print(motionConfirmCount);
                     Serial.println(")");
+                    noMotionCounter = 0;
                 } else if (targetLocked) {
+                    // Locked and target IS changing position
                     Serial.println(" (tracking)");
+                    noMotionCounter = 0;
                 }
 
                 // Only lock on after multiple consecutive detections
@@ -473,9 +491,8 @@ void scanAndTrack() {
                     Serial.print(">> TARGET LOCKED at ");
                     Serial.print(currentDistance);
                     Serial.println("cm");
+                    noMotionCounter = 0;
                 }
-
-                noMotionCounter = 0;
             } else {
                 Serial.println();
                 // Reset motion detection counter if no motion
@@ -483,7 +500,7 @@ void scanAndTrack() {
                 noMotionCounter++;
 
                 // If no motion detected for a while, go back to scanning
-                if (noMotionCounter > 30 && targetLocked) {
+                if (noMotionCounter > 10 && targetLocked) {
                     targetLocked = false;
                     noMotionCounter = 0;
                     baselineDistance = 0;  // Reset baseline
@@ -519,14 +536,9 @@ void scanAndTrack() {
 
     // NOW perform scanning/tracking motion AFTER taking measurements
     if (!targetLocked) {
-        // Reset baseline every few scans to adapt to changing view while sweeping
-        if (scanCounter > 0 && scanCounter % 3 == 0) {
-            baselineDistance = 0;  // Reset baseline periodically during scan
-        }
-
-        // Change direction after sweeping one way - CHECK THIS FIRST
+        // Change direction after sweeping one way
         scanCounter++;
-        if (scanCounter > 8) {  // Reduced for faster direction changes
+        if (scanCounter > 5) {  // Sweep 5 times in each direction
             scanningRight = !scanningRight;
             scanCounter = 0;
             baselineDistance = 0;  // Reset baseline when changing direction
@@ -537,14 +549,14 @@ void scanAndTrack() {
             }
         }
 
-        // Scan back and forth - more visible movement
+        // Scan back and forth - larger, more visible movement
         if (scanningRight) {
             yawServo.write(yawStopSpeed - scanSpeed);
-            delay(80);  // Increased for more visible movement
+            delay(150);  // Much longer for visible ~100 degree sweep
             yawServo.write(yawStopSpeed);
         } else {
             yawServo.write(yawStopSpeed + scanSpeed);
-            delay(80);  // Increased for more visible movement
+            delay(150);  // Much longer for visible ~100 degree sweep
             yawServo.write(yawStopSpeed);
         }
     } else {
