@@ -504,9 +504,24 @@ void scanAndTrack() {
         if (baselineDistance > 0) {
             long distanceChange = abs(currentDistance - baselineDistance);
 
+            // Debug output
+            Serial.print("Dist: ");
+            Serial.print(currentDistance);
+            Serial.print("cm, Base: ");
+            Serial.print(baselineDistance);
+            Serial.print("cm, Diff: ");
+            Serial.print(distanceChange);
+            Serial.print("cm");
+
             if (distanceChange > detectionThreshold) {
                 // Increment motion detection counter
                 motionDetections++;
+
+                Serial.print(" >> MOTION! (");
+                Serial.print(motionDetections);
+                Serial.print("/");
+                Serial.print(motionConfirmCount);
+                Serial.println(")");
 
                 // Only lock on after multiple consecutive detections
                 if (motionDetections >= motionConfirmCount && !targetLocked) {
@@ -518,6 +533,7 @@ void scanAndTrack() {
 
                 noMotionCounter = 0;
             } else {
+                Serial.println();
                 // Reset motion detection counter if no motion
                 motionDetections = 0;
                 noMotionCounter++;
@@ -530,6 +546,10 @@ void scanAndTrack() {
                     Serial.println(">> Target lost");
                 }
             }
+        } else {
+            Serial.print("Setting baseline: ");
+            Serial.print(currentDistance);
+            Serial.println("cm");
         }
 
         // Only update baseline if distance hasn't changed much
@@ -544,6 +564,7 @@ void scanAndTrack() {
 
         previousDistance = currentDistance;
     } else {
+        Serial.println("No valid reading");
         // No valid reading - might have lost target
         motionDetections = 0;  // Reset motion counter
         noMotionCounter++;
