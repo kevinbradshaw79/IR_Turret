@@ -490,29 +490,25 @@ void scanAndTrack() {
             scanCounter = 0;
         }
     } else {
-        // Active tracking - continue moving to follow the target
-        // Keep moving in the direction we're tracking
+        // Active tracking - sweep back and forth to follow the target
         static int trackMoveCounter = 0;
         trackMoveCounter++;
 
-        // Move continuously in tracking direction with periodic direction checks
-        if (trackMoveCounter % 3 == 0) {
-            // Continue tracking motion
-            if (trackingRight) {
-                yawServo.write(yawStopSpeed - trackingYawSpeed);
-                delay(40);
-                yawServo.write(yawStopSpeed);
-            } else {
-                yawServo.write(yawStopSpeed + trackingYawSpeed);
-                delay(40);
-                yawServo.write(yawStopSpeed);
-            }
+        // Continuously sweep in tracking direction
+        if (trackingRight) {
+            yawServo.write(yawStopSpeed - trackingYawSpeed);
+            delay(40);
+            yawServo.write(yawStopSpeed);
+        } else {
+            yawServo.write(yawStopSpeed + trackingYawSpeed);
+            delay(40);
+            yawServo.write(yawStopSpeed);
+        }
 
-            // Periodically reverse direction to sweep across target area
-            if (trackMoveCounter > 15) {
-                trackingRight = !trackingRight;
-                trackMoveCounter = 0;
-            }
+        // Reverse direction every ~1 second to sweep across target area
+        if (trackMoveCounter > 10) {
+            trackingRight = !trackingRight;
+            trackMoveCounter = 0;
         }
     }
 }
