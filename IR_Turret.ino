@@ -109,9 +109,10 @@ const int echoPin = 8;  // Ultrasonic sensor ECHO pin
 // Motion Tracking Variables
 bool trackingMode = false;  // Toggle for motion tracking mode
 int fireDistance = 50;  // Distance in cm to auto-fire (adjust based on your needs)
-int detectionThreshold = 10;  // Minimum distance change in cm to consider as motion
+int detectionThreshold = 15;  // Minimum distance change in cm to consider as motion
 int scanSpeed = 30;  // Speed for scanning (lower = slower, higher = faster)
 int trackingYawSpeed = 20;  // Speed for tracking targets (slower for accuracy)
+int motionConfirmCount = 3;  // Number of consecutive motion detections required to lock on
 
 void shakeHeadYes(int moves = 3); //function prototypes for shakeHeadYes and No for proper compiling
 void shakeHeadNo(int moves = 3);
@@ -368,28 +369,46 @@ void shakeHeadNo(int moves = 3) {
 }
 
 long measureDistance() {
-    // Clear the trigPin
-    digitalWrite(trigPin, LOW);
-    delayMicroseconds(2);
+    // Take multiple samples and average them to reduce noise
+    const int samples = 3;
+    long total = 0;
+    int validSamples = 0;
 
-    // Set the trigPin HIGH for 10 microseconds
-    digitalWrite(trigPin, HIGH);
-    delayMicroseconds(10);
-    digitalWrite(trigPin, LOW);
+    for (int i = 0; i < samples; i++) {
+        // Clear the trigPin
+        digitalWrite(trigPin, LOW);
+        delayMicroseconds(2);
 
-    // Read the echoPin, returns the sound wave travel time in microseconds
-    long duration = pulseIn(echoPin, HIGH, 30000); // 30ms timeout for max ~5m range
+        // Set the trigPin HIGH for 10 microseconds
+        digitalWrite(trigPin, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(trigPin, LOW);
 
-    // Calculate distance in centimeters (speed of sound is 343m/s or 0.0343cm/μs)
-    // Distance = (Time × Speed) / 2 (divide by 2 because sound travels to object and back)
-    long distance = duration * 0.0343 / 2;
+        // Read the echoPin, returns the sound wave travel time in microseconds
+        long duration = pulseIn(echoPin, HIGH, 30000); // 30ms timeout for max ~5m range
 
-    // Return 0 if no echo received (out of range)
-    if (distance == 0 || distance > 400) {
+        // Calculate distance in centimeters (speed of sound is 343m/s or 0.0343cm/μs)
+        // Distance = (Time × Speed) / 2 (divide by 2 because sound travels to object and back)
+        long distance = duration * 0.0343 / 2;
+
+        // Only include valid readings (within range)
+        if (distance > 0 && distance <= 400) {
+            total += distance;
+            validSamples++;
+        }
+
+        if (i < samples - 1) {
+            delay(10); // Short delay between samples
+        }
+    }
+
+    // Return 0 if no valid samples
+    if (validSamples == 0) {
         return 0;
     }
 
-    return distance;
+    // Return average of valid samples
+    return total / validSamples;
 }
 
 void scanAndTrack() {
@@ -401,6 +420,7 @@ void scanAndTrack() {
     static bool scanningRight = true;
     static bool trackingRight = true;
     static int noMotionCounter = 0;
+    static int motionDetections = 0;  // Count consecutive motion detections
 
     // Don't scan too frequently - give sensor time to settle
     if (millis() - lastScanTime < 100) {
@@ -430,23 +450,39 @@ void scanAndTrack() {
             long distanceChange = abs(currentDistance - baselineDistance);
 
             if (distanceChange > detectionThreshold) {
-                if (!targetLocked) {
+                // Increment motion detection counter
+                motionDetections++;
+
+                // Only lock on after multiple consecutive detections
+                if (motionDetections >= motionConfirmCount && !targetLocked) {
                     targetLocked = true;
-                    Serial.print("MOTION DETECTED at ");
+                    Serial.print("MOTION CONFIRMED at ");
                     Serial.print(currentDistance);
                     Serial.println(" cm - TRACKING");
+                } else if (!targetLocked) {
+                    Serial.print("Motion detected (");
+                    Serial.print(motionDetections);
+                    Serial.print("/");
+                    Serial.print(motionConfirmCount);
+                    Serial.println(")");
                 }
+
                 lastMotionTime = millis();
                 noMotionCounter = 0;
 
                 // Determine tracking direction based on distance change
-                if (currentDistance < baselineDistance) {
-                    Serial.println("Target approaching");
-                } else {
-                    Serial.println("Target retreating");
+                if (targetLocked) {
+                    if (currentDistance < baselineDistance) {
+                        Serial.println("Target approaching");
+                    } else {
+                        Serial.println("Target retreating");
+                    }
                 }
             } else {
+                // Reset motion detection counter if no motion
+                motionDetections = 0;
                 noMotionCounter++;
+
                 // If no motion detected for a while, go back to scanning
                 if (noMotionCounter > 30) {
                     targetLocked = false;
@@ -461,6 +497,7 @@ void scanAndTrack() {
         previousDistance = currentDistance;
     } else {
         // No valid reading - might have lost target
+        motionDetections = 0;  // Reset motion counter
         noMotionCounter++;
         if (noMotionCounter > 20) {
             targetLocked = false;
