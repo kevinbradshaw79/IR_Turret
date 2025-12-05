@@ -416,11 +416,12 @@ void scanAndTrack() {
     static long previousDistance = 0;
     static bool targetLocked = false;
     static unsigned long lastScanTime = 0;
-    static unsigned long lastMotionTime = 0;
+    static unsigned long lastMoveTime = 0;
     static bool scanningRight = true;
     static bool trackingRight = true;
     static int noMotionCounter = 0;
     static int motionDetections = 0;  // Count consecutive motion detections
+    static bool justMoved = false;  // Track if we just performed a movement
 
     // Don't scan too frequently - give sensor time to settle
     if (millis() - lastScanTime < 100) {
@@ -428,6 +429,62 @@ void scanAndTrack() {
     }
     lastScanTime = millis();
 
+    // Perform scanning/tracking motion first
+    if (!targetLocked) {
+        // Scan back and forth
+        if (scanningRight) {
+            yawServo.write(yawStopSpeed - scanSpeed);
+            delay(50);
+            yawServo.write(yawStopSpeed);
+        } else {
+            yawServo.write(yawStopSpeed + scanSpeed);
+            delay(50);
+            yawServo.write(yawStopSpeed);
+        }
+
+        // Change direction periodically (every ~2 seconds of scanning)
+        static int scanCounter = 0;
+        scanCounter++;
+        if (scanCounter > 20) {
+            scanningRight = !scanningRight;
+            scanCounter = 0;
+        }
+
+        justMoved = true;
+        lastMoveTime = millis();
+    } else {
+        // Active tracking - sweep back and forth to follow the target
+        static int trackMoveCounter = 0;
+        trackMoveCounter++;
+
+        // Continuously sweep in tracking direction
+        if (trackingRight) {
+            yawServo.write(yawStopSpeed - trackingYawSpeed);
+            delay(40);
+            yawServo.write(yawStopSpeed);
+        } else {
+            yawServo.write(yawStopSpeed + trackingYawSpeed);
+            delay(40);
+            yawServo.write(yawStopSpeed);
+        }
+
+        // Reverse direction every ~1 second to sweep across target area
+        if (trackMoveCounter > 10) {
+            trackingRight = !trackingRight;
+            trackMoveCounter = 0;
+        }
+
+        justMoved = true;
+        lastMoveTime = millis();
+    }
+
+    // Wait for turret to settle after movement before taking measurements
+    if (justMoved && (millis() - lastMoveTime < 100)) {
+        return;
+    }
+    justMoved = false;
+
+    // Now take distance measurement after settling
     long currentDistance = measureDistance();
 
     // If we have a valid reading
@@ -440,8 +497,9 @@ void scanAndTrack() {
             Serial.println(" cm - FIRING!");
             fire();
             delay(500); // Brief pause after firing
-            baselineDistance = currentDistance;
-            previousDistance = currentDistance;
+            baselineDistance = 0;  // Reset baseline after firing
+            previousDistance = 0;
+            motionDetections = 0;
             return;
         }
 
@@ -464,10 +522,11 @@ void scanAndTrack() {
                     Serial.print(motionDetections);
                     Serial.print("/");
                     Serial.print(motionConfirmCount);
-                    Serial.println(")");
+                    Serial.print(") - change: ");
+                    Serial.print(distanceChange);
+                    Serial.println("cm");
                 }
 
-                lastMotionTime = millis();
                 noMotionCounter = 0;
 
                 // Determine tracking direction based on distance change
@@ -480,72 +539,45 @@ void scanAndTrack() {
                 }
             } else {
                 // Reset motion detection counter if no motion
+                if (motionDetections > 0) {
+                    Serial.println("No motion - resetting counter");
+                }
                 motionDetections = 0;
                 noMotionCounter++;
 
                 // If no motion detected for a while, go back to scanning
-                if (noMotionCounter > 30) {
+                if (noMotionCounter > 30 && targetLocked) {
                     targetLocked = false;
                     noMotionCounter = 0;
+                    baselineDistance = 0;  // Reset baseline
                     Serial.println("Target lost - resuming scan");
                 }
             }
         }
 
-        // Update baseline distance
-        baselineDistance = currentDistance;
+        // Only update baseline if distance hasn't changed much
+        // This prevents the baseline from "creeping" during scans
+        if (baselineDistance == 0) {
+            baselineDistance = currentDistance;
+        } else if (abs(currentDistance - baselineDistance) <= detectionThreshold / 2) {
+            // Small change - update baseline gradually (moving average)
+            baselineDistance = (baselineDistance * 3 + currentDistance) / 4;
+        }
+        // If change is large, DON'T update baseline - this is potential motion
+
         previousDistance = currentDistance;
     } else {
         // No valid reading - might have lost target
+        if (motionDetections > 0) {
+            Serial.println("Lost reading - resetting");
+        }
         motionDetections = 0;  // Reset motion counter
         noMotionCounter++;
-        if (noMotionCounter > 20) {
+        if (noMotionCounter > 20 && targetLocked) {
             targetLocked = false;
             noMotionCounter = 0;
+            baselineDistance = 0;  // Reset baseline
             Serial.println("No target detected - resuming scan");
-        }
-    }
-
-    // Perform scanning motion to find targets
-    if (!targetLocked) {
-        // Scan back and forth
-        if (scanningRight) {
-            yawServo.write(yawStopSpeed - scanSpeed);
-            delay(50);
-            yawServo.write(yawStopSpeed);
-        } else {
-            yawServo.write(yawStopSpeed + scanSpeed);
-            delay(50);
-            yawServo.write(yawStopSpeed);
-        }
-
-        // Change direction periodically (every ~2 seconds of scanning)
-        static int scanCounter = 0;
-        scanCounter++;
-        if (scanCounter > 20) {
-            scanningRight = !scanningRight;
-            scanCounter = 0;
-        }
-    } else {
-        // Active tracking - sweep back and forth to follow the target
-        static int trackMoveCounter = 0;
-        trackMoveCounter++;
-
-        // Continuously sweep in tracking direction
-        if (trackingRight) {
-            yawServo.write(yawStopSpeed - trackingYawSpeed);
-            delay(40);
-            yawServo.write(yawStopSpeed);
-        } else {
-            yawServo.write(yawStopSpeed + trackingYawSpeed);
-            delay(40);
-            yawServo.write(yawStopSpeed);
-        }
-
-        // Reverse direction every ~1 second to sweep across target area
-        if (trackMoveCounter > 10) {
-            trackingRight = !trackingRight;
-            trackMoveCounter = 0;
         }
     }
 }
