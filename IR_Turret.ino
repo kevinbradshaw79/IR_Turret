@@ -110,8 +110,8 @@ const int echoPin = 8;  // Ultrasonic sensor ECHO pin
 bool trackingMode = false;  // Toggle for motion tracking mode
 int fireDistance = 50;  // Distance in cm to auto-fire (adjust based on your needs)
 int detectionThreshold = 15;  // Minimum distance change in cm to consider as motion
-int scanSpeed = 30;  // Speed for scanning (lower = slower, higher = faster)
-int trackingYawSpeed = 20;  // Speed for tracking targets (slower for accuracy)
+int scanSpeed = 50;  // Speed for scanning (lower = slower, higher = faster)
+int trackingYawSpeed = 30;  // Speed for tracking targets (slower for accuracy)
 int motionConfirmCount = 3;  // Number of consecutive motion detections required to lock on
 
 void shakeHeadYes(int moves = 3); //function prototypes for shakeHeadYes and No for proper compiling
@@ -164,23 +164,15 @@ void loop() {
     if (IrReceiver.decode()) {
 
         /*
-        * Print a short summary of received data
-        */
-        IrReceiver.printIRResultShort(&Serial);
-        IrReceiver.printIRSendUsage(&Serial);
-        if (IrReceiver.decodedIRData.protocol == UNKNOWN) { //command garbled or not recognized
-            Serial.println(F("Received noise or an unknown (or not yet enabled) protocol - if you wish to add this command, define it at the top of the file with the hex code printed below (ex: 0x8)"));
-            // We have an unknown protocol here, print more info
-            IrReceiver.printIRResultRawFormatted(&Serial, true);
-        }
-        Serial.println();
-
-        /*
         * !!!Important!!! Enable receiving of the next value,
         * since receiving has stopped after the end of the current received data packet.
         */
         IrReceiver.resume(); // Enable receiving of the next value
 
+        // Only process known commands, ignore noise
+        if (IrReceiver.decodedIRData.protocol == UNKNOWN) {
+            return; // Ignore unknown/noise signals
+        }
 
         /*
         * Finally, check the received data and perform actions according to the received command
@@ -417,6 +409,7 @@ void scanAndTrack() {
     static bool targetLocked = false;
     static unsigned long lastScanTime = 0;
     static unsigned long lastMoveTime = 0;
+    static unsigned long lastStatusPrint = 0;
     static bool scanningRight = true;
     static bool trackingRight = true;
     static int noMotionCounter = 0;
@@ -431,23 +424,27 @@ void scanAndTrack() {
 
     // Perform scanning/tracking motion first
     if (!targetLocked) {
-        // Scan back and forth
+        // Scan back and forth with more movement
         if (scanningRight) {
             yawServo.write(yawStopSpeed - scanSpeed);
-            delay(50);
+            delay(100);  // Increased from 50ms for more movement
             yawServo.write(yawStopSpeed);
         } else {
             yawServo.write(yawStopSpeed + scanSpeed);
-            delay(50);
+            delay(100);  // Increased from 50ms for more movement
             yawServo.write(yawStopSpeed);
         }
 
         // Change direction periodically (every ~2 seconds of scanning)
         static int scanCounter = 0;
         scanCounter++;
-        if (scanCounter > 20) {
+        if (scanCounter > 15) {  // Reduced from 20 for more direction changes
             scanningRight = !scanningRight;
             scanCounter = 0;
+            if (millis() - lastStatusPrint > 3000) {  // Print status every 3 seconds
+                Serial.println("Scanning...");
+                lastStatusPrint = millis();
+            }
         }
 
         justMoved = true;
@@ -457,19 +454,19 @@ void scanAndTrack() {
         static int trackMoveCounter = 0;
         trackMoveCounter++;
 
-        // Continuously sweep in tracking direction
+        // Continuously sweep in tracking direction with more movement
         if (trackingRight) {
             yawServo.write(yawStopSpeed - trackingYawSpeed);
-            delay(40);
+            delay(60);  // Increased from 40ms
             yawServo.write(yawStopSpeed);
         } else {
             yawServo.write(yawStopSpeed + trackingYawSpeed);
-            delay(40);
+            delay(60);  // Increased from 40ms
             yawServo.write(yawStopSpeed);
         }
 
         // Reverse direction every ~1 second to sweep across target area
-        if (trackMoveCounter > 10) {
+        if (trackMoveCounter > 8) {  // Reduced from 10 for more direction changes
             trackingRight = !trackingRight;
             trackMoveCounter = 0;
         }
@@ -492,9 +489,9 @@ void scanAndTrack() {
 
         // Check if target is within firing range
         if (currentDistance <= fireDistance && targetLocked) {
-            Serial.print("TARGET IN RANGE: ");
+            Serial.print(">> FIRING at ");
             Serial.print(currentDistance);
-            Serial.println(" cm - FIRING!");
+            Serial.println("cm");
             fire();
             delay(500); // Brief pause after firing
             baselineDistance = 0;  // Reset baseline after firing
@@ -514,34 +511,14 @@ void scanAndTrack() {
                 // Only lock on after multiple consecutive detections
                 if (motionDetections >= motionConfirmCount && !targetLocked) {
                     targetLocked = true;
-                    Serial.print("MOTION CONFIRMED at ");
+                    Serial.print(">> TARGET LOCKED at ");
                     Serial.print(currentDistance);
-                    Serial.println(" cm - TRACKING");
-                } else if (!targetLocked) {
-                    Serial.print("Motion detected (");
-                    Serial.print(motionDetections);
-                    Serial.print("/");
-                    Serial.print(motionConfirmCount);
-                    Serial.print(") - change: ");
-                    Serial.print(distanceChange);
                     Serial.println("cm");
                 }
 
                 noMotionCounter = 0;
-
-                // Determine tracking direction based on distance change
-                if (targetLocked) {
-                    if (currentDistance < baselineDistance) {
-                        Serial.println("Target approaching");
-                    } else {
-                        Serial.println("Target retreating");
-                    }
-                }
             } else {
                 // Reset motion detection counter if no motion
-                if (motionDetections > 0) {
-                    Serial.println("No motion - resetting counter");
-                }
                 motionDetections = 0;
                 noMotionCounter++;
 
@@ -550,7 +527,7 @@ void scanAndTrack() {
                     targetLocked = false;
                     noMotionCounter = 0;
                     baselineDistance = 0;  // Reset baseline
-                    Serial.println("Target lost - resuming scan");
+                    Serial.println(">> Target lost");
                 }
             }
         }
@@ -568,16 +545,13 @@ void scanAndTrack() {
         previousDistance = currentDistance;
     } else {
         // No valid reading - might have lost target
-        if (motionDetections > 0) {
-            Serial.println("Lost reading - resetting");
-        }
         motionDetections = 0;  // Reset motion counter
         noMotionCounter++;
         if (noMotionCounter > 20 && targetLocked) {
             targetLocked = false;
             noMotionCounter = 0;
             baselineDistance = 0;  // Reset baseline
-            Serial.println("No target detected - resuming scan");
+            Serial.println(">> Target lost");
         }
     }
 }
