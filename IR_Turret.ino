@@ -97,7 +97,7 @@ int rollMoveSpeed = 90; //this variable is the speed controller for the continuo
 int rollStopSpeed = 90; //value to stop the roll motor - keep this at 90
 
 int yawPrecision = 150; // this variable represents the time in milliseconds that the YAW motor will remain at it's set movement speed. Try values between 50 and 500 to start (500 milliseconds = 1/2 second)
-int rollPrecision = 158; // this variable represents the time in milliseconds that the ROLL motor with remain at it's set movement speed. If this ROLL motor is spinning more or less than 1/6th of a rotation when firing a single dart (one call of the fire(); command) you can try adjusting this value down or up slightly, but it should remain around the stock value (160ish) for best results.
+int rollPrecision = 200; // this variable represents the time in milliseconds that the ROLL motor with remain at it's set movement speed. If this ROLL motor is spinning more or less than 1/6th of a rotation when firing a single dart (one call of the fire(); command) you can try adjusting this value down or up slightly, but it should remain around the stock value (160ish) for best results.
 
 int pitchMax = 150; // this sets the maximum angle of the pitch servo to prevent it from crashing, it should remain below 180, and be greater than the pitchMin
 int pitchMin = 33; // this sets the minimum angle of the pitch servo to prevent it from crashing, it should remain above 0, and be less than the pitchMax
@@ -394,9 +394,13 @@ long measureDistance() {
 
 void scanAndTrack() {
     static long baselineDistance = 0;
+    static long previousDistance = 0;
     static bool targetLocked = false;
     static unsigned long lastScanTime = 0;
+    static unsigned long lastMotionTime = 0;
     static bool scanningRight = true;
+    static bool trackingRight = true;
+    static int noMotionCounter = 0;
 
     // Don't scan too frequently - give sensor time to settle
     if (millis() - lastScanTime < 100) {
@@ -417,6 +421,7 @@ void scanAndTrack() {
             fire();
             delay(500); // Brief pause after firing
             baselineDistance = currentDistance;
+            previousDistance = currentDistance;
             return;
         }
 
@@ -425,21 +430,43 @@ void scanAndTrack() {
             long distanceChange = abs(currentDistance - baselineDistance);
 
             if (distanceChange > detectionThreshold) {
-                targetLocked = true;
-                Serial.print("MOTION DETECTED at ");
-                Serial.print(currentDistance);
-                Serial.println(" cm - TRACKING");
+                if (!targetLocked) {
+                    targetLocked = true;
+                    Serial.print("MOTION DETECTED at ");
+                    Serial.print(currentDistance);
+                    Serial.println(" cm - TRACKING");
+                }
+                lastMotionTime = millis();
+                noMotionCounter = 0;
 
-                // Track the target by continuing to scan in small increments
+                // Determine tracking direction based on distance change
                 if (currentDistance < baselineDistance) {
-                    // Target is getting closer - might be moving toward us
                     Serial.println("Target approaching");
+                } else {
+                    Serial.println("Target retreating");
+                }
+            } else {
+                noMotionCounter++;
+                // If no motion detected for a while, go back to scanning
+                if (noMotionCounter > 30) {
+                    targetLocked = false;
+                    noMotionCounter = 0;
+                    Serial.println("Target lost - resuming scan");
                 }
             }
         }
 
         // Update baseline distance
         baselineDistance = currentDistance;
+        previousDistance = currentDistance;
+    } else {
+        // No valid reading - might have lost target
+        noMotionCounter++;
+        if (noMotionCounter > 20) {
+            targetLocked = false;
+            noMotionCounter = 0;
+            Serial.println("No target detected - resuming scan");
+        }
     }
 
     // Perform scanning motion to find targets
@@ -463,22 +490,29 @@ void scanAndTrack() {
             scanCounter = 0;
         }
     } else {
-        // If we have a target, make small tracking adjustments
-        // This keeps the turret pointed at the target as it moves
-        static int trackCounter = 0;
-        trackCounter++;
+        // Active tracking - continue moving to follow the target
+        // Keep moving in the direction we're tracking
+        static int trackMoveCounter = 0;
+        trackMoveCounter++;
 
-        // Occasionally make small adjustments to re-center on target
-        if (trackCounter > 10) {
-            // Small scan to keep tracking
-            yawServo.write(yawStopSpeed - trackingYawSpeed);
-            delay(30);
-            yawServo.write(yawStopSpeed);
-            delay(50);
-            yawServo.write(yawStopSpeed + trackingYawSpeed);
-            delay(30);
-            yawServo.write(yawStopSpeed);
-            trackCounter = 0;
+        // Move continuously in tracking direction with periodic direction checks
+        if (trackMoveCounter % 3 == 0) {
+            // Continue tracking motion
+            if (trackingRight) {
+                yawServo.write(yawStopSpeed - trackingYawSpeed);
+                delay(40);
+                yawServo.write(yawStopSpeed);
+            } else {
+                yawServo.write(yawStopSpeed + trackingYawSpeed);
+                delay(40);
+                yawServo.write(yawStopSpeed);
+            }
+
+            // Periodically reverse direction to sweep across target area
+            if (trackMoveCounter > 15) {
+                trackingRight = !trackingRight;
+                trackMoveCounter = 0;
+            }
         }
     }
 }
