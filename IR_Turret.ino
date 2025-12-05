@@ -415,6 +415,7 @@ void scanAndTrack() {
     static int motionDetections = 0;  // Count consecutive motion detections
     static int scanCounter = 0;
     static int trackMoveCounter = 0;
+    static int trackingCycles = 0;  // Count how long we've been tracking
 
     // Control loop timing - take measurement every 200ms
     if (millis() - lastScanTime < 200) {
@@ -438,6 +439,7 @@ void scanAndTrack() {
             baselineDistance = 0;  // Reset baseline after firing
             previousDistance = 0;
             motionDetections = 0;
+            trackingCycles = 0;
             return;
         }
 
@@ -454,6 +456,21 @@ void scanAndTrack() {
             Serial.print(distanceChange);
             Serial.print("cm");
 
+            // Tracking timeout - force unlock after 20 cycles
+            if (targetLocked) {
+                trackingCycles++;
+                if (trackingCycles > 20) {
+                    Serial.println();
+                    Serial.println(">> Target lost - tracking timeout");
+                    targetLocked = false;
+                    baselineDistance = 0;
+                    motionDetections = 0;
+                    noMotionCounter = 0;
+                    trackingCycles = 0;
+                    return;
+                }
+            }
+
             if (distanceChange > detectionThreshold) {
                 // If locked and distance isn't changing much, it's a false lock
                 if (targetLocked && abs(currentDistance - previousDistance) < 5) {
@@ -468,6 +485,7 @@ void scanAndTrack() {
                         baselineDistance = 0;
                         motionDetections = 0;
                         noMotionCounter = 0;
+                        trackingCycles = 0;
                         Serial.println(">> Target lost - no movement");
                     }
                 } else if (!targetLocked && motionDetections < motionConfirmCount) {
@@ -481,13 +499,16 @@ void scanAndTrack() {
                     noMotionCounter = 0;
                 } else if (targetLocked) {
                     // Locked and target IS changing position
-                    Serial.println(" (tracking)");
+                    Serial.print(" (tracking ");
+                    Serial.print(trackingCycles);
+                    Serial.println("/20)");
                     noMotionCounter = 0;
                 }
 
                 // Only lock on after multiple consecutive detections
                 if (motionDetections >= motionConfirmCount && !targetLocked) {
                     targetLocked = true;
+                    trackingCycles = 0;  // Reset tracking timer
                     Serial.print(">> TARGET LOCKED at ");
                     Serial.print(currentDistance);
                     Serial.println("cm");
@@ -503,6 +524,7 @@ void scanAndTrack() {
                 if (noMotionCounter > 10 && targetLocked) {
                     targetLocked = false;
                     noMotionCounter = 0;
+                    trackingCycles = 0;
                     baselineDistance = 0;  // Reset baseline
                     Serial.println(">> Target lost");
                 }
@@ -529,6 +551,7 @@ void scanAndTrack() {
         if (noMotionCounter > 20 && targetLocked) {
             targetLocked = false;
             noMotionCounter = 0;
+            trackingCycles = 0;
             baselineDistance = 0;  // Reset baseline
             Serial.println(">> Target lost");
         }
@@ -560,25 +583,10 @@ void scanAndTrack() {
             yawServo.write(yawStopSpeed);
         }
     } else {
-        // Active tracking - sweep back and forth to follow the target
-        trackMoveCounter++;
-
-        // Continuously sweep in tracking direction
-        if (trackingRight) {
-            yawServo.write(yawStopSpeed - trackingYawSpeed);
-            delay(60);
-            yawServo.write(yawStopSpeed);
-        } else {
-            yawServo.write(yawStopSpeed + trackingYawSpeed);
-            delay(60);
-            yawServo.write(yawStopSpeed);
-        }
-
-        // Reverse direction every few moves
-        if (trackMoveCounter > 6) {
-            trackingRight = !trackingRight;
-            trackMoveCounter = 0;
-        }
+        // Active tracking - STOP SWEEPING to get stable distance readings
+        // Just hold position and monitor distance
+        yawServo.write(yawStopSpeed);  // Stop movement
+        // The turret will stay pointed where it detected motion
     }
 }
 
