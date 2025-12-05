@@ -455,14 +455,17 @@ void scanAndTrack() {
             Serial.print("cm");
 
             if (distanceChange > detectionThreshold) {
-                // Increment motion detection counter
-                motionDetections++;
-
-                Serial.print(" >> MOTION! (");
-                Serial.print(motionDetections);
-                Serial.print("/");
-                Serial.print(motionConfirmCount);
-                Serial.println(")");
+                // Increment motion detection counter (but don't go crazy)
+                if (!targetLocked && motionDetections < motionConfirmCount) {
+                    motionDetections++;
+                    Serial.print(" >> MOTION! (");
+                    Serial.print(motionDetections);
+                    Serial.print("/");
+                    Serial.print(motionConfirmCount);
+                    Serial.println(")");
+                } else if (targetLocked) {
+                    Serial.println(" (tracking)");
+                }
 
                 // Only lock on after multiple consecutive detections
                 if (motionDetections >= motionConfirmCount && !targetLocked) {
@@ -516,6 +519,24 @@ void scanAndTrack() {
 
     // NOW perform scanning/tracking motion AFTER taking measurements
     if (!targetLocked) {
+        // Reset baseline every few scans to adapt to changing view while sweeping
+        if (scanCounter > 0 && scanCounter % 3 == 0) {
+            baselineDistance = 0;  // Reset baseline periodically during scan
+        }
+
+        // Change direction after sweeping one way - CHECK THIS FIRST
+        scanCounter++;
+        if (scanCounter > 8) {  // Reduced for faster direction changes
+            scanningRight = !scanningRight;
+            scanCounter = 0;
+            baselineDistance = 0;  // Reset baseline when changing direction
+            motionDetections = 0;   // Reset motion counter too
+            if (millis() - lastStatusPrint > 3000) {  // Print status every 3 seconds
+                Serial.println("Scanning...");
+                lastStatusPrint = millis();
+            }
+        }
+
         // Scan back and forth - more visible movement
         if (scanningRight) {
             yawServo.write(yawStopSpeed - scanSpeed);
@@ -525,18 +546,6 @@ void scanAndTrack() {
             yawServo.write(yawStopSpeed + scanSpeed);
             delay(80);  // Increased for more visible movement
             yawServo.write(yawStopSpeed);
-        }
-
-        // Change direction after sweeping one way
-        scanCounter++;
-        if (scanCounter > 8) {  // Reduced for faster direction changes
-            scanningRight = !scanningRight;
-            scanCounter = 0;
-            baselineDistance = 0;  // Reset baseline when changing direction
-            if (millis() - lastStatusPrint > 3000) {  // Print status every 3 seconds
-                Serial.println("Scanning...");
-                lastStatusPrint = millis();
-            }
         }
     } else {
         // Active tracking - sweep back and forth to follow the target
