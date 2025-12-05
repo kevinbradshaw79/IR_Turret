@@ -97,13 +97,27 @@ int rollMoveSpeed = 90; //this variable is the speed controller for the continuo
 int rollStopSpeed = 90; //value to stop the roll motor - keep this at 90
 
 int yawPrecision = 150; // this variable represents the time in milliseconds that the YAW motor will remain at it's set movement speed. Try values between 50 and 500 to start (500 milliseconds = 1/2 second)
-int rollPrecision = 158; // this variable represents the time in milliseconds that the ROLL motor with remain at it's set movement speed. If this ROLL motor is spinning more or less than 1/6th of a rotation when firing a single dart (one call of the fire(); command) you can try adjusting this value down or up slightly, but it should remain around the stock value (160ish) for best results.
+int rollPrecision = 200; // this variable represents the time in milliseconds that the ROLL motor with remain at it's set movement speed. If this ROLL motor is spinning more or less than 1/6th of a rotation when firing a single dart (one call of the fire(); command) you can try adjusting this value down or up slightly, but it should remain around the stock value (160ish) for best results.
 
 int pitchMax = 150; // this sets the maximum angle of the pitch servo to prevent it from crashing, it should remain below 180, and be greater than the pitchMin
 int pitchMin = 33; // this sets the minimum angle of the pitch servo to prevent it from crashing, it should remain above 0, and be less than the pitchMax
 
+// Ultrasonic Sensor Pins
+const int trigPin = 7;  // Ultrasonic sensor TRIG pin
+const int echoPin = 8;  // Ultrasonic sensor ECHO pin
+
+// Motion Tracking Variables
+bool trackingMode = false;  // Toggle for motion tracking mode
+int fireDistance = 50;  // Distance in cm to auto-fire (adjust based on your needs)
+int detectionThreshold = 15;  // Minimum distance change in cm to consider as motion
+int scanSpeed = 50;  // Speed for scanning (lower = slower, higher = faster)
+int trackingYawSpeed = 30;  // Speed for tracking targets (slower for accuracy)
+int motionConfirmCount = 3;  // Number of consecutive motion detections required to lock on
+
 void shakeHeadYes(int moves = 3); //function prototypes for shakeHeadYes and No for proper compiling
 void shakeHeadNo(int moves = 3);
+long measureDistance();  // function to measure distance with ultrasonic sensor
+void scanAndTrack();  // function to scan for and track motion
 #pragma endregion PINS AND PARAMS
 
 //////////////////////////////////////////////////
@@ -117,6 +131,10 @@ void setup() { //this is our setup function - it runs once on start up, and is b
     pitchServo.attach(11); //attach PITCH servo to pin 11
     rollServo.attach(12); //attach ROLL servo to pin 12
 
+    // Initialize ultrasonic sensor pins
+    pinMode(trigPin, OUTPUT);
+    pinMode(echoPin, INPUT);
+
     // Just to know which program is running on my microcontroller
     Serial.println(F("START " __FILE__ " from " __DATE__ "\r\nUsing library version " VERSION_IRREMOTE));
 
@@ -128,6 +146,8 @@ void setup() { //this is our setup function - it runs once on start up, and is b
     Serial.println(F("at pin 9"));
 
     homeServos(); //set servo motors to home position
+
+    Serial.println(F("Ultrasonic motion tracking enabled - Press # to toggle tracking mode"));
 }
 #pragma endregion SETUP
 
@@ -144,23 +164,15 @@ void loop() {
     if (IrReceiver.decode()) {
 
         /*
-        * Print a short summary of received data
-        */
-        IrReceiver.printIRResultShort(&Serial);
-        IrReceiver.printIRSendUsage(&Serial);
-        if (IrReceiver.decodedIRData.protocol == UNKNOWN) { //command garbled or not recognized
-            Serial.println(F("Received noise or an unknown (or not yet enabled) protocol - if you wish to add this command, define it at the top of the file with the hex code printed below (ex: 0x8)"));
-            // We have an unknown protocol here, print more info
-            IrReceiver.printIRResultRawFormatted(&Serial, true);
-        }
-        Serial.println();
-
-        /*
         * !!!Important!!! Enable receiving of the next value,
         * since receiving has stopped after the end of the current received data packet.
         */
         IrReceiver.resume(); // Enable receiving of the next value
 
+        // Only process known commands, ignore noise
+        if (IrReceiver.decodedIRData.protocol == UNKNOWN) {
+            return; // Ignore unknown/noise signals
+        }
 
         /*
         * Finally, check the received data and perform actions according to the received command
@@ -202,8 +214,26 @@ void loop() {
               shakeHeadNo(3);
               break;
 
+            case hashtag: // Toggle motion tracking mode
+              trackingMode = !trackingMode;
+              if (trackingMode) {
+                Serial.println("TRACKING MODE ENABLED");
+                shakeHeadYes(2);
+              } else {
+                Serial.println("TRACKING MODE DISABLED");
+                shakeHeadNo(2);
+                homeServos();
+              }
+              break;
+
         }
     }
+
+    // If tracking mode is enabled, scan and track motion
+    if (trackingMode) {
+        scanAndTrack();
+    }
+
     delay(5);
 }
 
@@ -329,6 +359,237 @@ void shakeHeadNo(int moves = 3) {
         delay(50); // Pause at starting position
     }
 }
+
+long measureDistance() {
+    // Take multiple samples and average them to reduce noise
+    const int samples = 3;
+    long total = 0;
+    int validSamples = 0;
+
+    for (int i = 0; i < samples; i++) {
+        // Clear the trigPin
+        digitalWrite(trigPin, LOW);
+        delayMicroseconds(2);
+
+        // Set the trigPin HIGH for 10 microseconds
+        digitalWrite(trigPin, HIGH);
+        delayMicroseconds(10);
+        digitalWrite(trigPin, LOW);
+
+        // Read the echoPin, returns the sound wave travel time in microseconds
+        long duration = pulseIn(echoPin, HIGH, 30000); // 30ms timeout for max ~5m range
+
+        // Calculate distance in centimeters (speed of sound is 343m/s or 0.0343cm/μs)
+        // Distance = (Time × Speed) / 2 (divide by 2 because sound travels to object and back)
+        long distance = duration * 0.0343 / 2;
+
+        // Only include valid readings (within range)
+        if (distance > 0 && distance <= 400) {
+            total += distance;
+            validSamples++;
+        }
+
+        if (i < samples - 1) {
+            delay(10); // Short delay between samples
+        }
+    }
+
+    // Return 0 if no valid samples
+    if (validSamples == 0) {
+        return 0;
+    }
+
+    // Return average of valid samples
+    return total / validSamples;
+}
+
+void scanAndTrack() {
+    static long baselineDistance = 0;
+    static long previousDistance = 0;
+    static bool targetLocked = false;
+    static unsigned long lastScanTime = 0;
+    static unsigned long lastStatusPrint = 0;
+    static bool scanningRight = true;
+    static bool trackingRight = true;
+    static int noMotionCounter = 0;
+    static int motionDetections = 0;  // Count consecutive motion detections
+    static int scanCounter = 0;
+    static int trackMoveCounter = 0;
+    static int trackingCycles = 0;  // Count how long we've been tracking
+
+    // Control loop timing - take measurement every 200ms
+    if (millis() - lastScanTime < 200) {
+        return;
+    }
+    lastScanTime = millis();
+
+    // Take distance measurement first
+    long currentDistance = measureDistance();
+
+    // If we have a valid reading
+    if (currentDistance > 0) {
+
+        // Check if target is within firing range
+        if (currentDistance <= fireDistance && targetLocked) {
+            Serial.print(">> FIRING at ");
+            Serial.print(currentDistance);
+            Serial.println("cm");
+            fire();
+            delay(500); // Brief pause after firing
+            baselineDistance = 0;  // Reset baseline after firing
+            previousDistance = 0;
+            motionDetections = 0;
+            trackingCycles = 0;
+            return;
+        }
+
+        // Motion detection: if distance changed significantly, we detected motion
+        if (baselineDistance > 0) {
+            long distanceChange = abs(currentDistance - baselineDistance);
+
+            // Debug output
+            Serial.print("Dist: ");
+            Serial.print(currentDistance);
+            Serial.print("cm, Base: ");
+            Serial.print(baselineDistance);
+            Serial.print("cm, Diff: ");
+            Serial.print(distanceChange);
+            Serial.print("cm");
+
+            // Tracking timeout - force unlock after 20 cycles
+            if (targetLocked) {
+                trackingCycles++;
+                if (trackingCycles > 20) {
+                    Serial.println();
+                    Serial.println(">> Target lost - tracking timeout");
+                    targetLocked = false;
+                    baselineDistance = 0;
+                    motionDetections = 0;
+                    noMotionCounter = 0;
+                    trackingCycles = 0;
+                    return;
+                }
+            }
+
+            if (distanceChange > detectionThreshold) {
+                // If locked and distance isn't changing much, it's a false lock
+                if (targetLocked && abs(currentDistance - previousDistance) < 5) {
+                    noMotionCounter++;
+                    Serial.print(" (no change - ");
+                    Serial.print(noMotionCounter);
+                    Serial.println("/10)");
+
+                    // Lose lock if target distance isn't changing
+                    if (noMotionCounter > 10) {
+                        targetLocked = false;
+                        baselineDistance = 0;
+                        motionDetections = 0;
+                        noMotionCounter = 0;
+                        trackingCycles = 0;
+                        Serial.println(">> Target lost - no movement");
+                    }
+                } else if (!targetLocked && motionDetections < motionConfirmCount) {
+                    // Not locked yet - increment counter
+                    motionDetections++;
+                    Serial.print(" >> MOTION! (");
+                    Serial.print(motionDetections);
+                    Serial.print("/");
+                    Serial.print(motionConfirmCount);
+                    Serial.println(")");
+                    noMotionCounter = 0;
+                } else if (targetLocked) {
+                    // Locked and target IS changing position
+                    Serial.print(" (tracking ");
+                    Serial.print(trackingCycles);
+                    Serial.println("/20)");
+                    noMotionCounter = 0;
+                }
+
+                // Only lock on after multiple consecutive detections
+                if (motionDetections >= motionConfirmCount && !targetLocked) {
+                    targetLocked = true;
+                    trackingCycles = 0;  // Reset tracking timer
+                    Serial.print(">> TARGET LOCKED at ");
+                    Serial.print(currentDistance);
+                    Serial.println("cm");
+                    noMotionCounter = 0;
+                }
+            } else {
+                Serial.println();
+                // Reset motion detection counter if no motion
+                motionDetections = 0;
+                noMotionCounter++;
+
+                // If no motion detected for a while, go back to scanning
+                if (noMotionCounter > 10 && targetLocked) {
+                    targetLocked = false;
+                    noMotionCounter = 0;
+                    trackingCycles = 0;
+                    baselineDistance = 0;  // Reset baseline
+                    Serial.println(">> Target lost");
+                }
+            }
+        } else {
+            Serial.print("Setting baseline: ");
+            Serial.print(currentDistance);
+            Serial.println("cm");
+        }
+
+        // Set baseline once and keep it fixed while scanning
+        // Don't update it - this prevents "creeping" that follows targets
+        if (baselineDistance == 0) {
+            baselineDistance = currentDistance;
+        }
+        // DO NOT update baseline - let it stay fixed to detect real motion
+
+        previousDistance = currentDistance;
+    } else {
+        Serial.println("No valid reading");
+        // No valid reading - might have lost target
+        motionDetections = 0;  // Reset motion counter
+        noMotionCounter++;
+        if (noMotionCounter > 20 && targetLocked) {
+            targetLocked = false;
+            noMotionCounter = 0;
+            trackingCycles = 0;
+            baselineDistance = 0;  // Reset baseline
+            Serial.println(">> Target lost");
+        }
+    }
+
+    // NOW perform scanning/tracking motion AFTER taking measurements
+    if (!targetLocked) {
+        // Change direction after sweeping one way
+        scanCounter++;
+        if (scanCounter > 5) {  // Sweep 5 times in each direction
+            scanningRight = !scanningRight;
+            scanCounter = 0;
+            baselineDistance = 0;  // Reset baseline when changing direction
+            motionDetections = 0;   // Reset motion counter too
+            if (millis() - lastStatusPrint > 3000) {  // Print status every 3 seconds
+                Serial.println("Scanning...");
+                lastStatusPrint = millis();
+            }
+        }
+
+        // Scan back and forth - larger, more visible movement
+        if (scanningRight) {
+            yawServo.write(yawStopSpeed - scanSpeed);
+            delay(150);  // Much longer for visible ~100 degree sweep
+            yawServo.write(yawStopSpeed);
+        } else {
+            yawServo.write(yawStopSpeed + scanSpeed);
+            delay(150);  // Much longer for visible ~100 degree sweep
+            yawServo.write(yawStopSpeed);
+        }
+    } else {
+        // Active tracking - STOP SWEEPING to get stable distance readings
+        // Just hold position and monitor distance
+        yawServo.write(yawStopSpeed);  // Stop movement
+        // The turret will stay pointed where it detected motion
+    }
+}
+
 #pragma endregion FUNCTIONS
 
 //////////////////////////////////////////////////
